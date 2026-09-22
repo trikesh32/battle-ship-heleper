@@ -52,7 +52,7 @@ test('new moves cancel workers and stale responses cannot change the target', ()
   h.click(44, 'hit');
   assert.equal(old.terminated, true); assert.equal(h.api.board()[44], 'hit');
   old.deliver({ result: ready(0) });
-  assert.equal(h.get('#suggestion').textContent, 'Ищем самый вероятный выстрел');
+  assert.equal(h.get('#suggestion').textContent, 'Выбираем следующий выстрел');
   h.workers[1].deliver({ result: ready(45) });
   assert.equal(h.get('#suggestion').textContent, 'Цель — Е5');
   assert.equal(h.get('#forecast').hidden, false);
@@ -85,4 +85,13 @@ test('impossible board clears provisional highlights and loading state', () => {
   assert.equal(h.get('#board').querySelectorAll('.recommended').length, 0);
   assert.equal(h.get('#suggestion').textContent, 'Проверьте отметки');
   assert.equal(h.get('.tip-card').attributes['aria-busy'], 'false');
+});
+test('endgame recommendations explain expected shots and show differing hit chances', () => {
+  const h = harness();
+  h.workers[0].deliver({ result: { ...ready(25), selection: 'endgame', expectedShots: 5.75,
+    cells: [25, 33], estimates: [{ cell: 25, hitProbability: 0.4 }, { cell: 33, hitProbability: 0.6 }] } });
+  assert.match(h.get('#tip').textContent, /5,8/);
+  assert.match(h.get('#tip').textContent, /числу выстрелов/);
+  assert.doesNotMatch(h.get('#tip').textContent, /одинаковый расчётный шанс/);
+  assert.equal(h.get('#hit-chance').textContent, '≈ 40–60%');
 });

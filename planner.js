@@ -190,9 +190,94 @@ function createBattleshipPlanner(fleetDefinition) {
     if (alive) throw new Error('Симуляция не завершилась.');
     return shots;
   }
+  // Exact belief-state search for small endgames. A state contains every fleet
+  // still compatible with the feedback, and the cells already fired upon.
+  // We branch on miss / hit / sunk (including the revealed ship cells).
+  async function solveEndgame(context, checkpoint, deadline, options) {
+    const lengths = [4, 3, 2, 1].flatMap(length => Array(context.fleet[length] || 0).fill(length));
+    if (!lengths.length || lengths.length > 3) return null;
+    const unknown = [...context.board.keys()].filter(i => context.board[i] === UNKNOWN);
+    if (unknown.length > 12) return null;
+    const bit = new Map(unknown.map((cell, i) => [cell, 1 << i]));
+    const layouts = [];
+    function enumerate(chosen, blocked, start) {
+      if (chosen.length === lengths.length) {
+        if (context.hits.every(i => chosen.some(p => p.cells.includes(i)))) layouts.push(chosen.map(p => ({
+          mask: p.cells.reduce((mask, i) => mask | (bit.get(i) || 0), 0),
+          sunk: `sunk:${p.cells.join(',')}`
+        })));
+        return;
+      }
+      const list = context.pool[lengths[chosen.length]];
+      for (let i = start; i < list.length; i++) {
+        const p = list[i];
+        if (p.cells.some(cell => blocked.has(cell))) continue;
+        enumerate([...chosen, p], new Set([...blocked, ...p.halo]), lengths[chosen.length + 1] === p.length ? i + 1 : 0);
+      }
+    }
+    enumerate([], new Set(), 0);
+    if (!layouts.length) return { status: 'inconsistent', cells: [], samples: 0, simulations: 0 };
+    const occupied = layouts.map(layout => layout.reduce((mask, ship) => mask | ship.mask, 0));
+    const memo = new Map();
+    let nodes = 0;
+    const limit = options.endgameNodes ?? 50000;
+    const exhausted = Symbol('endgame budget');
+    async function solve(ids, fired) {
+      const key = `${fired}:${ids.join(',')}`;
+      if (memo.has(key)) return memo.get(key);
+      if (++nodes > limit || Date.now() >= deadline) throw exhausted;
+      if (nodes % 128 === 0) await checkpoint({ phase: 'endgame', states: nodes, samples: layouts.length, target: layouts.length });
+      const possible = ids.reduce((mask, id) => mask | occupied[id], 0) & ~fired;
+      if (!possible) return { cost: 0, mask: 0 };
+      const certain = ids.reduce((mask, id) => mask & occupied[id], possible) & ~fired;
+      // If every surviving fleet has the same occupied cells, every remaining
+      // shot hits. Ship segmentation no longer affects the cost to completion.
+      if (certain === possible) return { cost: unknown.filter((_, i) => possible & (1 << i)).length, mask: possible };
+      let best = Infinity, bestMask = 0;
+      // A certain hit must be fired in every winning continuation. Moving that
+      // shot earlier cannot add a shot and can only reveal information sooner.
+      const candidates = certain || possible;
+      for (let index = 0; index < unknown.length; index++) {
+        const shot = 1 << index;
+        if (!(candidates & shot)) continue;
+        const outcomes = new Map();
+        for (const id of ids) {
+          const ship = layouts[id].find(p => p.mask & shot);
+          const outcome = !ship ? 'miss' : (ship.mask & ~fired) === shot ? ship.sunk : 'hit';
+          if (!outcomes.has(outcome)) outcomes.set(outcome, []);
+          outcomes.get(outcome).push(id);
+        }
+        let cost = 1;
+        for (const group of outcomes.values()) {
+          cost += group.length / ids.length * (await solve(group, fired | shot)).cost;
+          if (cost > best + 1e-10) break;
+        }
+        if (cost < best - 1e-10) { best = cost; bestMask = shot; }
+        else if (Math.abs(cost - best) < 1e-10) bestMask |= shot;
+      }
+      const result = { cost: best, mask: bestMask };
+      memo.set(key, result);
+      return result;
+    }
+    try {
+      const result = await solve(layouts.map((_, i) => i), 0);
+      const probability = Array(100).fill(0);
+      unknown.forEach((cell, i) => probability[cell] = occupied.filter(mask => mask & (1 << i)).length / layouts.length);
+      const cells = unknown.filter((_, i) => result.mask & (1 << i));
+      return { status: 'ready', cells, probability, selection: 'endgame', mode: context.hits.length ? 'target' : 'hunt',
+        estimates: cells.map(cell => ({ cell, hitProbability: probability[cell], expectedShots: result.cost })),
+        expectedShots: result.cost, samples: layouts.length, distinct: layouts.length, simulations: 0, states: nodes, exact: true };
+    } catch (error) {
+      if (error !== exhausted) throw error;
+      return null;
+    }
+  }
   async function analyze(input, options = {}) {
+    if (options.isCancelled?.()) throw new Error('cancelled');
     const started = Date.now(), context = prepare(input), rng = random(options.seed ?? boardSeed(context.board));
     const sampleCount = options.samples ?? 512, chains = options.chains ?? 4, burn = options.burn ?? 160, thin = options.thin ?? 8;
+    const huntBlend = options.huntBlend ?? 0, informationWeight = options.informationWeight ?? 0;
+    if (!Number.isFinite(huntBlend) || huntBlend < 0 || huntBlend > 1 || !Number.isFinite(informationWeight) || informationWeight < 0) throw new Error('Некорректные веса стратегии.');
     const maxMs = options.maxMs ?? 12000;
     if (!Number.isInteger(sampleCount) || sampleCount < 1 || !Number.isInteger(chains) || chains < 1 || !Number.isInteger(burn) || burn < 0 || !Number.isInteger(thin) || thin < 1) throw new Error('Некорректные параметры расчёта.');
     let lastYield = Date.now(), lastProgress = 0;
@@ -207,6 +292,10 @@ function createBattleshipPlanner(fleetDefinition) {
     }
     if (!Object.values(context.fleet).some(n => n > 0)) {
       return { status: context.hits.length ? 'inconsistent' : 'complete', cells: [], samples: 0, simulations: 0 };
+    }
+    if (options.endgame !== false) {
+      const exact = await solveEndgame(context, checkpoint, Math.min(started + maxMs, Date.now() + 1500), options);
+      if (exact) return { ...exact, elapsedMs: Date.now() - started };
     }
     const worlds = [];
     for (let chainIndex = 0; chainIndex < Math.min(chains, sampleCount); chainIndex++) {
@@ -227,11 +316,35 @@ function createBattleshipPlanner(fleetDefinition) {
     const occupancy = Array(100).fill(0), maps = symmetries(context.board);
     for (const world of worlds) world.owner.forEach((ship, i) => { if (ship >= 0 && context.board[i] === UNKNOWN) occupancy[i] += 1 / worlds.length; });
     const probability = occupancy.map((_, i) => Math.min(1, maps.reduce((sum, map) => sum + occupancy[map[i]], 0) / maps.length));
-    const best = Math.max(...probability);
-    const cells = probability.flatMap((p, cell) => context.board[cell] === UNKNOWN && p > 0 && Math.abs(p - best) < 1e-12 ? [cell] : []);
+    const scores = [...probability];
+    let selection = 'probability';
+    // Experimental policies are opt-in. Ranking scores are not probabilities.
+    // Keep both the target phase and the exact endgame unchanged.
+    if (!context.hits.length && huntBlend > 0) {
+      const density = Array(100).fill(0);
+      for (let length = 1; length <= 4; length++) for (const p of (context.fleet[length] ? context.pool[length] : [])) {
+        for (const i of p.cells) if (context.board[i] === UNKNOWN) density[i] += context.fleet[length];
+      }
+      const total = density.reduce((a, b) => a + b, 0), decks = probability.reduce((a, b) => a + b, 0);
+      if (total > 0) density.forEach((value, i) => scores[i] = (1 - huntBlend) * probability[i] + huntBlend * value / total * decks);
+      selection = 'blend';
+    }
+    if (!context.hits.length && informationWeight > 0) {
+      const single = Array(100).fill(0);
+      for (const world of worlds) for (const ship of world.layout) if (ship.length === 1) single[ship.cells[0]] += 1 / worlds.length;
+      for (let i = 0; i < 100; i++) {
+        const sunk = maps.reduce((sum, map) => sum + single[map[i]], 0) / maps.length;
+        const outcomes = [1 - probability[i], probability[i] - sunk, sunk];
+        const entropy = -outcomes.reduce((sum, p) => sum + (p > 0 ? p * Math.log2(p) : 0), 0);
+        scores[i] += informationWeight * entropy;
+      }
+      selection = 'information';
+    }
+    const best = Math.max(...scores);
+    const cells = scores.flatMap((score, cell) => context.board[cell] === UNKNOWN && score > 0 && Math.abs(score - best) < 1e-12 ? [cell] : []);
     const estimates = cells.map(cell => ({ cell, hitProbability: probability[cell] }));
     const distinct = new Set(worlds.map(w => w.layout.map(p => p.cells.join(',')).sort().join(';'))).size;
-    return { status: 'ready', cells, estimates, selection: 'probability', samples: worlds.length, distinct, simulations: 0, probability, elapsedMs: Date.now() - started };
+    return { status: 'ready', cells, estimates, selection, samples: worlds.length, distinct, simulations: 0, probability, scores, elapsedMs: Date.now() - started };
   }
   return { analyze, prepare, seedLayout, makeChain, makeWorld, rollout, chooseShot, random, symmetries };
 }

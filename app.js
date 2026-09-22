@@ -65,13 +65,13 @@ function highlight(cells, probability) {
 }
 function startAnalysis(version) {
   const snapshot = [...board];
-  $('#suggestion').textContent = 'Ищем самый вероятный выстрел';
-  $('#tip').textContent = 'Оцениваем шанс попадания по полным допустимым расстановкам флота. Пока жёлтым показана быстрая предварительная подсказка.';
+  $('#suggestion').textContent = 'Выбираем следующий выстрел';
+  $('#tip').textContent = 'Оцениваем возможные расстановки и ходы до победы. Пока жёлтым показана предварительная подсказка.';
   $('#recommendation-count').textContent = 'Подбираем допустимые расстановки…';
   $('.tip-card').setAttribute('aria-busy', 'true');
   const progress = value => {
     if (version !== analysisVersion) return;
-    $('#recommendation-count').textContent = `Расстановки: ${value.samples} / ${value.target}`;
+    $('#recommendation-count').textContent = value.phase === 'endgame' ? 'Просчитываем последние корабли…' : `Расстановки: ${value.samples} / ${value.target}`;
   };
   const finish = result => {
     if (version !== analysisVersion) return;
@@ -81,11 +81,17 @@ function startAnalysis(version) {
       highlight(result.cells, result.probability);
       const best = result.estimates[0];
       $('#suggestion').textContent = result.cells.length > 1 ? 'Выбирайте жёлтую клетку' : `Цель — ${coordinate(best.cell)}`;
-      $('#tip').textContent = 'Подсвечены клетки с максимальным расчётным шансом попадания. Оценка приблизительная и зависит от выборки расстановок.';
+      $('#tip').textContent = result.selection === 'endgame'
+        ? `Этот ход минимизирует среднее число оставшихся выстрелов в расчётной модели: около ${result.expectedShots.toFixed(1).replace('.', ',')} до победы. Конкретная партия может закончиться раньше или позже.`
+        : 'Подсвечены клетки с максимальным расчётным шансом попадания. Оценка приблизительная и зависит от выборки расстановок.';
       $('#forecast').hidden = false;
-      $('#hit-chance').textContent = `≈ ${Math.round(best.hitProbability * 100)}%`;
+      const chances = result.estimates.map(estimate => Math.round(estimate.hitProbability * 100));
+      const low = Math.min(...chances), high = Math.max(...chances);
+      $('#hit-chance').textContent = low === high ? `≈ ${low}%` : `≈ ${low}–${high}%`;
       $('#recommendation-count').textContent = `${result.samples} расстановок`;
-      if (result.cells.length > 1) $('#tip').textContent += ` У подсвеченных клеток одинаковый расчётный шанс.`;
+      if (result.cells.length > 1) $('#tip').textContent += result.selection === 'endgame'
+        ? ' Подсвеченные ходы равноценны по ожидаемому числу выстрелов.'
+        : ' У подсвеченных клеток одинаковый расчётный шанс.';
       $('#announcement').textContent = `Рекомендуется ${coordinate(best.cell)}. Шанс попадания около ${Math.round(best.hitProbability * 100)}%.`;
     } else if (result.status === 'inconsistent') {
       highlight([]);
