@@ -44,7 +44,7 @@ function harness(workerAvailable = true) {
   };
   return { get, workers, timers, pending, api, click };
 }
-const ready = cell => ({ status: 'ready', cells: [cell], estimates: [{ cell, mean: 35.2, hitProbability: 0.5 }], samples: 512, simulations: 800, probability: Array(100).fill(0.5), selection: 'rollout' });
+const ready = cell => ({ status: 'ready', cells: [cell], estimates: [{ cell, hitProbability: 0.5 }], samples: 512, simulations: 800, probability: Array(100).fill(0.5), selection: 'probability' });
 
 test('new moves cancel workers and stale responses cannot change the target', () => {
   const h = harness(), old = h.workers[0];
@@ -52,11 +52,11 @@ test('new moves cancel workers and stale responses cannot change the target', ()
   h.click(44, 'hit');
   assert.equal(old.terminated, true); assert.equal(h.api.board()[44], 'hit');
   old.deliver({ result: ready(0) });
-  assert.equal(h.get('#suggestion').textContent, 'Ищем короткий путь к победе');
+  assert.equal(h.get('#suggestion').textContent, 'Ищем самый вероятный выстрел');
   h.workers[1].deliver({ result: ready(45) });
   assert.equal(h.get('#suggestion').textContent, 'Цель — Е5');
   assert.equal(h.get('#forecast').hidden, false);
-  assert.equal(h.get('#expected-shots').textContent, '≈ 35.2');
+  assert.equal(h.get('#hit-chance').textContent, '≈ 50%');
   assert.equal(h.get('#board').querySelectorAll('.recommended').length, 1);
   h.get('#undo').listeners.click();
   assert.equal(h.api.board()[44], 'unknown'); assert.equal(h.get('#forecast').hidden, true);

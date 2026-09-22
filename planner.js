@@ -193,9 +193,8 @@ function createBattleshipPlanner(fleetDefinition) {
   async function analyze(input, options = {}) {
     const started = Date.now(), context = prepare(input), rng = random(options.seed ?? boardSeed(context.board));
     const sampleCount = options.samples ?? 512, chains = options.chains ?? 4, burn = options.burn ?? 160, thin = options.thin ?? 8;
-    const stages = options.stages ?? [8, 24, 64, 160], maxMs = options.maxMs ?? 12000;
-    if (!Number.isInteger(sampleCount) || sampleCount < 1 || !Number.isInteger(chains) || chains < 1 || !Number.isInteger(burn) || burn < 0 || !Number.isInteger(thin) || thin < 1
-      || !Array.isArray(stages) || !stages.length || stages.some((n, i) => !Number.isInteger(n) || n < 1 || (i > 0 && n <= stages[i - 1]))) throw new Error('Некорректные параметры расчёта.');
+    const maxMs = options.maxMs ?? 12000;
+    if (!Number.isInteger(sampleCount) || sampleCount < 1 || !Number.isInteger(chains) || chains < 1 || !Number.isInteger(burn) || burn < 0 || !Number.isInteger(thin) || thin < 1) throw new Error('Некорректные параметры расчёта.');
     let lastYield = Date.now(), lastProgress = 0;
     async function checkpoint(progress) {
       if (options.isCancelled?.()) throw new Error('cancelled');
@@ -226,59 +225,13 @@ function createBattleshipPlanner(fleetDefinition) {
       }
     }
     const occupancy = Array(100).fill(0), maps = symmetries(context.board);
-    const canonical = Array.from({ length: 100 }, (_, i) => Math.min(...maps.map(map => map[i])));
     for (const world of worlds) world.owner.forEach((ship, i) => { if (ship >= 0 && context.board[i] === UNKNOWN) occupancy[i] += 1 / worlds.length; });
     const probability = occupancy.map((_, i) => Math.min(1, maps.reduce((sum, map) => sum + occupancy[map[i]], 0) / maps.length));
-    // Symmetric positions need only one representative, especially on an empty
-    // board. Use only transformations preserving ALL current observations.
-    let candidates = probability.flatMap((p, cell) => p > 0 && canonical[cell] === cell ? [{ cell, hitProbability: p, sum: 0, sumSquares: 0, trials: 0, costs: [] }] : []);
-    const policyCell = chooseShot(context.board, context.fleet, context.pool.map(list => [...list]), random(boardSeed(context.board)));
-    const baselineCell = candidates.some(c => c.cell === canonical[policyCell]) ? canonical[policyCell] : [...candidates].sort((a, b) => b.hitProbability - a.hitProbability)[0].cell;
-    // Every candidate uses the SAME worlds and continuation seeds at each stage.
-    const trials = Array.from({ length: stages.at(-1) }, () => ({ world: worlds[Math.floor(rng() * worlds.length)], seed: Math.floor(rng() * 4294967296) }));
-    let simulations = 0, completedStages = 0, budgetReached = false;
-    for (let stage = 0; stage < stages.length; stage++) {
-      const previous = candidates.map(c => ({ ...c, costs: [...c.costs] }));
-      for (const candidate of candidates) {
-        for (let t = candidate.trials; t < stages[stage]; t++) {
-          const shots = rollout(context, trials[t].world, candidate.cell, trials[t].seed);
-          candidate.sum += shots; candidate.sumSquares += shots * shots; candidate.costs.push(shots); candidate.trials++; simulations++;
-          if (t % 4 === 0) await checkpoint({ phase: 'simulating', samples: worlds.length, simulations, stage: stage + 1, stages: stages.length });
-          if (Date.now() - started > maxMs) { budgetReached = true; break; }
-        }
-        if (budgetReached) break;
-      }
-      // Never compare uneven trial counts: discard an unfinished stage.
-      if (budgetReached) { candidates = previous; break; }
-      completedStages++;
-      candidates.sort((a, b) => a.sum / a.trials - b.sum / b.trials || b.hitProbability - a.hitProbability || a.cell - b.cell);
-      if (stage < stages.length - 1) {
-        const baseline = candidates.find(c => c.cell === baselineCell);
-        const next = candidates.slice(0, Math.max(4, Math.ceil(candidates.length / 3)));
-        if (!next.includes(baseline)) next.push(baseline);
-        candidates = next;
-      }
-    }
-    if (!completedStages) return { status: 'limited', cells: [], samples: worlds.length, simulations, probability };
-    const baseline = candidates.find(c => c.cell === baselineCell);
-    // Avoid switching away from the observation-only policy on simulation noise.
-    // This paired-error guard is a heuristic, not a calibrated confidence bound:
-    // sampled fleets can be correlated and candidates were adaptively screened.
-    const reliable = candidates.filter(c => {
-      if (c === baseline) return true;
-      const differences = c.costs.map((cost, i) => baseline.costs[i] - cost);
-      const gain = differences.reduce((sum, n) => sum + n, 0) / c.trials;
-      const error = c.trials > 1 ? Math.sqrt(differences.reduce((sum, n) => sum + (n - gain) ** 2, 0) / (c.trials - 1) / c.trials) : Infinity;
-      return gain > 2 * error;
-    });
-    reliable.sort((a, b) => a.sum - b.sum || a.cell - b.cell);
-    const selected = reliable[0];
-    const estimates = candidates.map(c => ({ cell: c.cell, mean: c.sum / c.trials, trials: c.trials, hitProbability: c.hitProbability,
-      standardError: c.trials > 1 ? Math.sqrt(Math.max(0, (c.sumSquares - c.sum * c.sum / c.trials) / (c.trials - 1)) / c.trials) : null }));
+    const best = Math.max(...probability);
+    const cells = probability.flatMap((p, cell) => context.board[cell] === UNKNOWN && p > 0 && Math.abs(p - best) < 1e-12 ? [cell] : []);
+    const estimates = cells.map(cell => ({ cell, hitProbability: probability[cell] }));
     const distinct = new Set(worlds.map(w => w.layout.map(p => p.cells.join(',')).sort().join(';'))).size;
-    estimates.sort((a, b) => (b.cell === selected.cell) - (a.cell === selected.cell) || a.mean - b.mean);
-    const cells = [...new Set(maps.map(map => map[selected.cell]))].sort((a, b) => a - b);
-    return { status: 'ready', cells, estimates, baselineCell, selection: selected === baseline ? 'baseline' : 'rollout', samples: worlds.length, distinct, simulations, completedStages, budgetReached, probability, elapsedMs: Date.now() - started };
+    return { status: 'ready', cells, estimates, selection: 'probability', samples: worlds.length, distinct, simulations: 0, probability, elapsedMs: Date.now() - started };
   }
   return { analyze, prepare, seedLayout, makeChain, makeWorld, rollout, chooseShot, random, symmetries };
 }

@@ -65,13 +65,13 @@ function highlight(cells, probability) {
 }
 function startAnalysis(version) {
   const snapshot = [...board];
-  $('#suggestion').textContent = 'Ищем короткий путь к победе';
-  $('#tip').textContent = 'Сравниваем продолжения игры на полных расстановках флота. Пока жёлтым показана быстрая предварительная подсказка.';
+  $('#suggestion').textContent = 'Ищем самый вероятный выстрел';
+  $('#tip').textContent = 'Оцениваем шанс попадания по полным допустимым расстановкам флота. Пока жёлтым показана быстрая предварительная подсказка.';
   $('#recommendation-count').textContent = 'Подбираем допустимые расстановки…';
   $('.tip-card').setAttribute('aria-busy', 'true');
   const progress = value => {
     if (version !== analysisVersion) return;
-    $('#recommendation-count').textContent = value.phase === 'sampling' ? `Расстановки: ${value.samples} / ${value.target}` : `Симуляций: ${value.simulations} · этап ${value.stage} / ${value.stages}`;
+    $('#recommendation-count').textContent = `Расстановки: ${value.samples} / ${value.target}`;
   };
   const finish = result => {
     if (version !== analysisVersion) return;
@@ -81,15 +81,12 @@ function startAnalysis(version) {
       highlight(result.cells, result.probability);
       const best = result.estimates[0];
       $('#suggestion').textContent = result.cells.length > 1 ? 'Выбирайте жёлтую клетку' : `Цель — ${coordinate(best.cell)}`;
-      $('#tip').textContent = result.selection === 'rollout'
-        ? 'Симуляции показали устойчивое сокращение числа выстрелов по сравнению с быстрой подсказкой. Оценка приблизительная и зависит от выборки и стратегии продолжения.'
-        : 'Симуляции не показали устойчивого преимущества другого хода. Сохраняем базовый выбор, чтобы не менять цель из-за случайного шума в расчёте.';
+      $('#tip').textContent = 'Подсвечены клетки с максимальным расчётным шансом попадания. Оценка приблизительная и зависит от выборки расстановок.';
       $('#forecast').hidden = false;
-      $('#expected-shots').textContent = `≈ ${best.mean.toFixed(1)}`;
       $('#hit-chance').textContent = `≈ ${Math.round(best.hitProbability * 100)}%`;
-      $('#recommendation-count').textContent = `${result.samples} расстановок · ${result.simulations} симуляций${result.budgetReached ? ' · лимит времени' : ''}`;
-      if (result.cells.length > 1) $('#tip').textContent += ` Подсвеченные клетки равноценны по симметрии поля.`;
-      $('#announcement').textContent = `Рекомендуется ${coordinate(best.cell)}. Около ${best.mean.toFixed(1)} выстрелов до победы, включая следующий.`;
+      $('#recommendation-count').textContent = `${result.samples} расстановок`;
+      if (result.cells.length > 1) $('#tip').textContent += ` У подсвеченных клеток одинаковый расчётный шанс.`;
+      $('#announcement').textContent = `Рекомендуется ${coordinate(best.cell)}. Шанс попадания около ${Math.round(best.hitProbability * 100)}%.`;
     } else if (result.status === 'inconsistent') {
       highlight([]);
       $('#suggestion').textContent = 'Проверьте отметки';
@@ -97,7 +94,7 @@ function startAnalysis(version) {
       $('#recommendation-count').textContent = 'Расстановка невозможна';
     } else {
       $('#suggestion').textContent = 'Предварительная подсказка';
-      $('#tip').textContent = 'Полный расчёт не завершён. Жёлтые клетки выбраны по допустимым положениям отдельных кораблей; число ходов до победы пока не оценено.';
+      $('#tip').textContent = 'Полный расчёт не завершён. Жёлтые клетки выбраны по допустимым положениям отдельных кораблей; вероятности пока не рассчитаны.';
       $('#recommendation-count').textContent = 'Упрощённая оценка';
     }
   };
